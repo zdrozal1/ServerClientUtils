@@ -1,12 +1,7 @@
 package net.guess;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.net.SocketTimeoutException;
+import java.io.*;
+import java.net.*;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
@@ -24,6 +19,8 @@ public class Server {
 	private volatile boolean isRunning = false;
 	private boolean debugEnabled = false;
 	private boolean enableEvents = true;
+	public static int BROADCAST_PORT = 8888;
+	private static ScheduledExecutorService broadcastExecutorService;
 	private Client.ConnectionEvent onConnect = () -> System.out.println("Connected!");
 	private Client.ConnectionEvent onDisconnect = () -> System.out.println("Disconnected!");
 	private Consumer<String> onClientMessageReceived = msg -> System.out.println("Message received: " + msg);
@@ -37,6 +34,8 @@ public class Server {
 		this.address = address;
 		this.port = port;
 		clientHandlers = Executors.newFixedThreadPool(maxClients);
+		
+		new Thread(() -> startBroadcasting(port)).start();
 		
 	}
 	
@@ -95,7 +94,6 @@ public class Server {
 				onConnect.onEvent();
 			}
 			printDebug("Server started and listening for connections...");
-			
 			while (isRunning) {
 				try {
 					Socket clientSocket = serverSocket.accept();
@@ -230,12 +228,14 @@ public class Server {
 		
 		printDebug("Stopping server...");
 		
-		printDebug("Sending clients stop message");
-		broadcastMessage("STOP");
 		isRunning = false;
 		clientHandlers.shutdownNow();
 		if (enableEvents) {
 			onDisconnect.onEvent();
+		}
+		
+		if (broadcastExecutorService != null) {
+			stopBroadcasting();
 		}
 		
 		try {
@@ -269,4 +269,60 @@ public class Server {
 	public CopyOnWriteArrayList<Socket> getConnectedClients() {
 		return connectedClients;
 	}
+	
+	public void sendFileToClient(Socket clientSocket, String filePath, String fileType) {
+		try (BufferedReader reader = new BufferedReader(new FileReader(filePath)); PrintWriter writer = new PrintWriter(
+				clientSocket.getOutputStream(), true)) {
+			
+			File file = new File(filePath);
+			if (!file.exists()) {
+				printDebug("File does not exist: " + filePath);
+				return;
+			}
+			
+			// Send metadata with the file type
+			sendMessageToClient(clientSocket, "STARTFILE " + file.getName() + " " + file.length() + " " + fileType);
+			
+			try (FileInputStream fileInputStream = new FileInputStream(file)) {
+				byte[] buffer = new byte[1024];
+				int bytesRead;
+				while ((bytesRead = fileInputStream.read(buffer)) != -1) {
+					clientSocket.getOutputStream().write(buffer, 0, bytesRead);
+				}
+			}
+			
+			sendMessageToClient(clientSocket, "ENDFILE");
+		} catch (IOException e) {
+			printDebug("Error sending file: " + e.getMessage());
+		}
+	}
+	
+	public void startBroadcasting(int port) {
+		broadcastExecutorService = Executors.newSingleThreadScheduledExecutor();
+		broadcastExecutorService.scheduleAtFixedRate(() -> {
+			if (!isRunning) {
+				try (DatagramSocket socket = new DatagramSocket()) {
+					socket.setBroadcast(true);
+					String message = "SERVER_DISCOVERY:" + port;
+					byte[] buffer = message.getBytes();
+					DatagramPacket packet = new DatagramPacket(buffer, buffer.length,
+					                                           InetAddress.getByName("255.255.255.255"),
+					                                           BROADCAST_PORT);
+					socket.send(packet);
+					
+					printDebug("Broadcasted server on port: " + port + " Using port: " + BROADCAST_PORT);
+				} catch (IOException e) {
+					printDebug("Error broadcasting server availability: " + e.getMessage());
+				}
+			}
+		}, 0, 5, TimeUnit.SECONDS);
+	}
+	
+	public void stopBroadcasting() {
+		if (broadcastExecutorService != null && !broadcastExecutorService.isShutdown()) {
+			broadcastExecutorService.shutdown();
+			printDebug("Broadcasting stopped");
+		}
+	}
+	
 }

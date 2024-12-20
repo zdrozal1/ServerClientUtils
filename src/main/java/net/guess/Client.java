@@ -1,10 +1,11 @@
 package net.guess;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
+import java.io.*;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -26,16 +27,38 @@ public class Client {
 	private ConnectionEvent onConnect = () -> System.out.println("Connected!");
 	private ConnectionEvent onDisconnect = () -> System.out.println("Disconnected!");
 	private ConnectionEvent onPreConnect = () -> System.out.println("Preparing to connect...");
-	private ConnectionEvent onPostConnect = () -> System.out.println("Connection established successfully!");
 	private ConnectionEvent onPreDisconnect = () -> System.out.println("Preparing to disconnect...");
 	private ConnectionEvent onPostDisconnect = () -> System.out.println("Disconnection completed!");
 	private MessageEvent onMessageSent = message -> System.out.println("Message sent: " + message);
 	private MessageEvent onMessageReceived = message -> System.out.println("Message received: " + message);
+	private String fileSaveDirectory = "";
+	private FileHandler fileHandler;
+	private int BROADCAST_PORT;
+	
+	public Client(int BROADCAST_PORT) {
+		setListeningForBroadCasts(BROADCAST_PORT);
+		setDefaultListenerBehavior();
+	}
 	
 	public Client(String serverAddress, int serverPort) {
 		this.serverAddress = serverAddress;
 		this.serverPort = serverPort;
 		setDefaultListenerBehavior();
+	}
+	
+	public static void runDataParse(InputStream inputStream, FileOutputStream fileOutputStream, int size) throws IOException {
+		byte[] buffer = new byte[(int) size];
+		int bytesRead;
+		
+		while ((bytesRead = inputStream.read(buffer)) != -1) {
+			String data = new String(buffer, 0, bytesRead, StandardCharsets.UTF_8);
+			
+			if (data.contains("ENDFILE")) {
+				data = data.substring(0, data.indexOf("ENDFILE"));
+			}
+			
+			fileOutputStream.write(data.getBytes(StandardCharsets.UTF_8));
+		}
 	}
 	
 	public void setServerAddress(String serverAddress) {
@@ -54,10 +77,6 @@ public class Client {
 		this.retryDelay = retryDelay;
 	}
 	
-	public void setSerializer(MessageSerializer serializer) {
-		this.serializer = serializer;
-	}
-	
 	public void setOnConnect(ConnectionEvent onConnect) {
 		this.onConnect = onConnect;
 	}
@@ -68,10 +87,6 @@ public class Client {
 	
 	public void setOnPreConnect(ConnectionEvent onPreConnect) {
 		this.onPreConnect = onPreConnect;
-	}
-	
-	public void setOnPostConnect(ConnectionEvent onPostConnect) {
-		this.onPostConnect = onPostConnect;
 	}
 	
 	public void setOnPreDisconnect(ConnectionEvent onPreDisconnect) {
@@ -128,9 +143,6 @@ public class Client {
 				isConnected = true;
 				if (enableEvents) {
 					onConnect.onEvent();
-				}
-				if (enableEvents) {
-					onPostConnect.onEvent();
 				}
 				
 				startListener();
@@ -198,33 +210,85 @@ public class Client {
 		}
 	}
 	
+	public void setFileHandler(FileHandler fileHandler) {
+		this.fileHandler = fileHandler;
+	}
+	
+	public void setListeningForBroadCasts(int broadCastPort) {
+		try (DatagramSocket socket = new DatagramSocket(broadCastPort, InetAddress.getByName("0.0.0.0"))) {
+			socket.setBroadcast(true);
+			while (true) {
+				if (!isConnected) {
+					byte[] buffer = new byte[256];
+					DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+					socket.receive(packet);
+					
+					String message = new String(packet.getData(), 0, packet.getLength());
+					if (message.startsWith("SERVER_DISCOVERY:")) {
+						String[] parts = message.split(":");
+						String serverAddress = packet.getAddress().getHostAddress();
+						int serverPort = Integer.parseInt(parts[1]);
+						
+						printDebug("Discovered server at " + serverAddress + ":" + serverPort);
+						this.setServerPort(serverPort);
+						this.setServerAddress(serverAddress);
+					}
+				} else {
+					printDebug("Already connected");
+					break;
+				}
+			}
+		} catch (IOException e) {
+			printDebug("Error listening for broadcasts: " + e.getMessage());
+		}
+	}
+	
 	private void startListener() {
 		listenerThread = new Thread(() -> {
+			System.out.println("Starting listener thread");
 			try {
 				String message;
 				while ((message = reader.readLine()) != null) {
 					onMessageReceived.onMessage(message);
-					listenerBehavior.onMessage(message);
+					listenerBehavior.onMessage(message);  // Continue handling messages after the file transfer.
 				}
 			} catch (IOException e) {
 				printDebug("Connection lost: " + e.getMessage());
+				disconnect();  // Only disconnect when the connection is lost, not after file transfer.
 			}
 		});
 		listenerThread.start();
 	}
 	
+	private void defaultFileHandler(String fileName, InputStream inputStream, int size) throws IOException {
+		String savePath = fileSaveDirectory.isEmpty() ? fileName : fileSaveDirectory + "/" + fileName;
+		try (FileOutputStream fileOutputStream = new FileOutputStream(savePath)) {
+			runDataParse(inputStream, fileOutputStream, size);
+		}
+		printDebug("File " + fileName + " received successfully at default location.");
+	}
+	
+	// Adjust the listener behavior to handle file transfer
 	private void setDefaultListenerBehavior() {
 		this.listenerBehavior = message -> {
 			printDebug("Received: " + message);
-			String[] parts = message.split(" ", 2);
-			if (parts.length > 0) {
-				String command = parts[0];
-				String data = parts.length > 1 ? parts[1] : "";
-				if (responseHandlers.containsKey(command)) {
-					responseHandlers.get(command).handle(data);
+			if (message.startsWith("STARTFILE")) {
+				String[] parts = message.split(" ");
+				String fileName = parts[1];
+				long fileSize = Long.parseLong(parts[2]);
+				String fileType = parts.length > 3 ? parts[3] : "unknown"; // Default to "unknown" if no type is provided
+				
+				try (InputStream inputStream = socket.getInputStream()) {
+					if (fileHandler != null) {
+						fileHandler.handleFile(fileName, inputStream, (int) fileSize, fileType);
+					} else {
+						defaultFileHandler(fileName, inputStream, (int) fileSize);
+					}
+				} catch (IOException e) {
+					printDebug("Error receiving file: " + e.getMessage());
 				}
-			} else {
-				printDebug("Received empty or invalid message: " + message);
+			} else if (message.equals("ENDFILE")) {
+				printDebug("File transfer completed.");
 			}
 		};
 	}
@@ -259,4 +323,10 @@ public class Client {
 	public interface MessageSerializer {
 		String serialize(Object message);
 	}
+	
+	@FunctionalInterface
+	public interface FileHandler {
+		void handleFile(String fileName, InputStream fileData, int size, String fileType) throws IOException;
+	}
+	
 }
