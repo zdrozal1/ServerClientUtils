@@ -1,9 +1,15 @@
 package net.guess;
 
 import java.io.*;
-import java.net.*;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.util.Base64;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 public class Server {
@@ -19,24 +25,28 @@ public class Server {
 	private volatile boolean isRunning = false;
 	private boolean debugEnabled = false;
 	private boolean enableEvents = true;
-	public static int BROADCAST_PORT = 8888;
-	private static ScheduledExecutorService broadcastExecutorService;
 	private Client.ConnectionEvent onConnect = () -> System.out.println("Connected!");
 	private Client.ConnectionEvent onDisconnect = () -> System.out.println("Disconnected!");
 	private Consumer<String> onClientMessageReceived = msg -> System.out.println("Message received: " + msg);
 	private Consumer<String> onClientRegistered = client -> System.out.println("Client registered: " + client);
 	private Consumer<String> onBroadcast = msg -> System.out.println("Broadcast sent: " + msg);
 	private Consumer<String> onMessage = msg -> System.out.println("Message sent: " + msg);
-	private Consumer<Socket> onHeartbeatFailure = client -> System.out.println(
-			"Heartbeat failed for client: " + client);
 	
 	public Server(String address, int port) {
 		this.address = address;
 		this.port = port;
 		clientHandlers = Executors.newFixedThreadPool(maxClients);
+	}
+	
+	public static byte[] readFile(String fileName) throws IOException {
+		File file = new File(fileName);
+		byte[] fileData = new byte[(int) file.length()];
 		
-		new Thread(() -> startBroadcasting(port)).start();
+		try (FileInputStream fis = new FileInputStream(file)) {
+			fis.read(fileData);
+		}
 		
+		return fileData;
 	}
 	
 	public void setEnableEvents(boolean enableEvents) {
@@ -65,10 +75,6 @@ public class Server {
 	
 	public void setOnMessage(Consumer<String> handler) {
 		this.onMessage = handler;
-	}
-	
-	public void setOnHeartbeatFailure(Consumer<Socket> handler) {
-		this.onHeartbeatFailure = handler;
 	}
 	
 	public void addMessageHandler(String command, Consumer<String> handler) {
@@ -207,19 +213,6 @@ public class Server {
 		printDebug("Client successfully registered: " + clientName);
 	}
 	
-	private void startHeartbeat(Socket client) {
-		Executors.newSingleThreadScheduledExecutor().scheduleAtFixedRate(() -> {
-			try (PrintWriter writer = new PrintWriter(client.getOutputStream(), true)) {
-				writer.println("PING");
-				printDebug("Heartbeat sent to client: " + client.getInetAddress());
-			} catch (IOException e) {
-				printDebug("Heartbeat failed for client: " + client.getInetAddress() + " - " + e.getMessage());
-				onHeartbeatFailure.accept(client);
-				connectedClients.remove(client);
-			}
-		}, 0, 10, TimeUnit.SECONDS);
-	}
-	
 	public void stopServer() {
 		if (!isRunning) {
 			printDebug("Server is already stopped.");
@@ -232,10 +225,6 @@ public class Server {
 		clientHandlers.shutdownNow();
 		if (enableEvents) {
 			onDisconnect.onEvent();
-		}
-		
-		if (broadcastExecutorService != null) {
-			stopBroadcasting();
 		}
 		
 		try {
@@ -270,59 +259,37 @@ public class Server {
 		return connectedClients;
 	}
 	
-	public void sendFileToClient(Socket clientSocket, String filePath, String fileType) {
-		try (BufferedReader reader = new BufferedReader(new FileReader(filePath)); PrintWriter writer = new PrintWriter(
-				clientSocket.getOutputStream(), true)) {
-			
-			File file = new File(filePath);
-			if (!file.exists()) {
-				printDebug("File does not exist: " + filePath);
-				return;
-			}
-			
-			// Send metadata with the file type
-			sendMessageToClient(clientSocket, "STARTFILE " + file.getName() + " " + file.length() + " " + fileType);
-			
-			try (FileInputStream fileInputStream = new FileInputStream(file)) {
-				byte[] buffer = new byte[1024];
-				int bytesRead;
-				while ((bytesRead = fileInputStream.read(buffer)) != -1) {
-					clientSocket.getOutputStream().write(buffer, 0, bytesRead);
-				}
-			}
-			
-			sendMessageToClient(clientSocket, "ENDFILE");
+	public void sendFileData(Socket clientSocket, String fileName, String fileType) {
+		PrintWriter writer = clientWriters.get(clientSocket);
+		byte[] fileData = null;
+		try {
+			fileData = Server.readFile("testDir/file.txt");
 		} catch (IOException e) {
-			printDebug("Error sending file: " + e.getMessage());
+			printDebug("Error reading file: " + e.getMessage());
 		}
-	}
-	
-	public void startBroadcasting(int port) {
-		broadcastExecutorService = Executors.newSingleThreadScheduledExecutor();
-		broadcastExecutorService.scheduleAtFixedRate(() -> {
-			if (!isRunning) {
-				try (DatagramSocket socket = new DatagramSocket()) {
-					socket.setBroadcast(true);
-					String message = "SERVER_DISCOVERY:" + port;
-					byte[] buffer = message.getBytes();
-					DatagramPacket packet = new DatagramPacket(buffer, buffer.length,
-					                                           InetAddress.getByName("255.255.255.255"),
-					                                           BROADCAST_PORT);
-					socket.send(packet);
-					
-					printDebug("Broadcasted server on port: " + port + " Using port: " + BROADCAST_PORT);
-				} catch (IOException e) {
-					printDebug("Error broadcasting server availability: " + e.getMessage());
-				}
+		if (writer != null) {
+			// Send the STARTFILE message with the filename and size
+			writer.println("STARTFILE " + fileName + " " + fileData.length + " " + fileType);
+			
+			String dataPrefix = "FILEDATA";
+			int dataSize = fileData.length;
+			int chunkSize = 1024; // Define the chunk size for file transfer
+			
+			// Split the file data into chunks and send
+			for (int i = 0; i < dataSize; i += chunkSize) {
+				int end = Math.min(i + chunkSize, dataSize);
+				byte[] chunk = new byte[end - i];
+				System.arraycopy(fileData, i, chunk, 0, chunk.length);
+				
+				// Base64 encode the chunk and send it
+				String encodedChunk = Base64.getEncoder().encodeToString(chunk);
+				String dataMessage = dataPrefix + encodedChunk; // Prefix "FILEDATA" added here
+				System.out.println("Sending chunk: " + dataMessage);  // Log chunk being sent
+				writer.println(dataMessage); // Send the encoded chunk
 			}
-		}, 0, 5, TimeUnit.SECONDS);
-	}
-	
-	public void stopBroadcasting() {
-		if (broadcastExecutorService != null && !broadcastExecutorService.isShutdown()) {
-			broadcastExecutorService.shutdown();
-			printDebug("Broadcasting stopped");
+			
+			// End of file transfer signal
+			writer.println("ENDFILE");
 		}
 	}
-	
 }
