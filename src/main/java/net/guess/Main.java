@@ -1,47 +1,47 @@
 package net.guess;
 
-import net.guess.Other.SimpleFileHandler;
+import net.guess.Other.FileWatcher;
 
-import java.util.Timer;
-import java.util.TimerTask;
+import java.io.IOException;
+import java.nio.file.StandardWatchEventKinds;
+import java.util.Scanner;
 
 public class Main {
 	static class ServerMain {
 		public static void main(String[] args) {
-			System.out.println("SERVER OUTPUT:");
-			Server server = new Server("localhost", 8080);
-			server.setOnConnect(() -> {
-				System.out.println("Successfully connected!");
-			});
-			server.setOnDisconnect(() -> System.out.println("Disconnected from server."));
-			server.setMaxClients(1);
-			server.setDebugEnabled(true);
-			server.startServerAsync(90000);
-			
-			Timer timer = new Timer();
-			timer.schedule(new TimerTask() {
-				@Override
-				public void run() {
-					server.sendFileData(server.getConnectedClients().getFirst(), "testDir/file.txt", "standard");
+			Server server = new Server();
+			FileWatcher testFileWatcher = new FileWatcher("test.txt", 2000, path -> {
+				System.out.println("test.txt has changed, sending file. Path: " + path);
+				server.sendMessage("FILE_UPDATE");
+				try {
+					server.sendFileToClient("test.txt");
+				} catch (IOException e) {
+					throw new RuntimeException(e);
 				}
-			}, 3 * 1000);
+			}, StandardWatchEventKinds.ENTRY_CREATE);
+			server.addFileWatcher(testFileWatcher);
+			server.startBroadcasting(8888);
+			server.startServerAsync(8888);
 			
+			Scanner scanner = new Scanner(System.in);
+			while (true) {
+				String line = scanner.nextLine();
+				server.sendMessage(line);
+			}
 		}
 	}
 	
 	static class ClientMain {
 		public static void main(String[] args) {
-			System.out.println("CLIENT OUTPUT:");
-			Client client = new Client("localhost", 8080);
-			client.setRetryDelay(1000);
-			client.setMaxRetries(10);
-			client.setOnConnect(() -> System.out.println("Successfully connected!"));
-			client.setOnDisconnect(() -> System.out.println("Disconnected from server."));
-			client.setDebugEnabled(true);
-			
-			client.setFileHandler(new SimpleFileHandler());
-			
-			client.connectAsync(90000, 90000);
+			Client client = new Client();
+			client.registerMessageHandler("TEST_COMMAND", msg -> {
+				System.out.println("Client received: " + msg);
+			});
+			client.registerMessageHandler("FILE_UPDATE", msg -> {
+				System.out.println("Client received: " + msg);
+				client.receiveFileFromServer(1024, "Client_Received.txt");
+			});
+			new Thread(client::listenForServerBroadcasts).start();
 		}
 	}
 }

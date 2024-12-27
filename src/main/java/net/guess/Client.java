@@ -1,294 +1,175 @@
 package net.guess;
 
+import net.guess.Other.MessageHandler;
+
 import java.io.*;
-import java.net.Socket;
-import java.nio.charset.StandardCharsets;
+import java.net.*;
 import java.util.HashMap;
 import java.util.Map;
 
 public class Client {
-	private final Map<String, MessageHandler> responseHandlers = new HashMap<>();
-	private boolean debugEnabled = false;
-	private String serverAddress;
-	private int serverPort;
-	private Socket socket;
-	private BufferedReader reader;
-	private PrintWriter writer;
-	private Thread listenerThread;
 	private boolean isConnected = false;
-	private int maxRetries = 3;
-	private int retryDelay = 2000;
-	private ListenerBehavior listenerBehavior;
-	private MessageSerializer serializer = Object::toString;
-	private boolean enableEvents = true;
-	private ConnectionEvent onConnect = () -> System.out.println("Connected!");
-	private ConnectionEvent onDisconnect = () -> System.out.println("Disconnected!");
-	private ConnectionEvent onPreConnect = () -> System.out.println("Preparing to connect...");
-	private ConnectionEvent onPreDisconnect = () -> System.out.println("Preparing to disconnect...");
-	private ConnectionEvent onPostDisconnect = () -> System.out.println("Disconnection completed!");
-	private MessageEvent onMessageSent = message -> System.out.println("Message sent: " + message);
-	private MessageEvent onMessageReceived = message -> System.out.println("Message received: " + message);
-	private FileHandler fileHandler;
+	private Socket socket;
+	private PrintWriter writer;
+	private final Map<String, MessageHandler> messageHandlers = new HashMap<>();
+	private String serverHost;
+	private int serverPort;
 	
-	public Client(String serverAddress, int serverPort) {
-		this.serverAddress = serverAddress;
-		this.serverPort = serverPort;
-		setDefaultListenerBehavior();
+	public Client() {
+		// Register default message handlers
+		registerMessageHandler("SHUTDOWN", this::handleShutdown);
+		registerMessageHandler("UPDATE_MESSAGE", this::handleUpdateMessage);
 	}
 	
-	public static void runDataParse(InputStream inputStream, FileOutputStream fileOutputStream, int size) throws IOException {
-		byte[] buffer = new byte[(int) size];
+	public synchronized void receiveFileFromServer(int fileSize, String name) throws IOException {
 		int bytesRead;
-		
-		while ((bytesRead = inputStream.read(buffer)) != -1) {
-			String data = new String(buffer, 0, bytesRead, StandardCharsets.UTF_8);
+		FileOutputStream fos = null;
+		BufferedOutputStream bos = null;
+		Socket sock = null;
+		try {
+			sock = new Socket(serverHost, serverPort);
+			byte[] mybytearray = new byte[fileSize];
+			InputStream is = sock.getInputStream();
+			fos = new FileOutputStream(name);
+			bos = new BufferedOutputStream(fos);
 			
-			if (data.contains("ENDFILE")) {
-				data = data.substring(0, data.indexOf("ENDFILE"));
+			while ((bytesRead = is.read(mybytearray)) != -1) {
+				bos.write(mybytearray, 0, bytesRead);
 			}
 			
-			fileOutputStream.write(data.getBytes(StandardCharsets.UTF_8));
-		}
-	}
-	
-	public void setServerAddress(String serverAddress) {
-		this.serverAddress = serverAddress;
-	}
-	
-	public void setServerPort(int serverPort) {
-		this.serverPort = serverPort;
-	}
-	
-	public void setMaxRetries(int maxRetries) {
-		this.maxRetries = maxRetries;
-	}
-	
-	public void setRetryDelay(int retryDelay) {
-		this.retryDelay = retryDelay;
-	}
-	
-	public void setOnConnect(ConnectionEvent onConnect) {
-		this.onConnect = onConnect;
-	}
-	
-	public void setOnDisconnect(ConnectionEvent onDisconnect) {
-		this.onDisconnect = onDisconnect;
-	}
-	
-	public void setOnPreConnect(ConnectionEvent onPreConnect) {
-		this.onPreConnect = onPreConnect;
-	}
-	
-	public void setOnPreDisconnect(ConnectionEvent onPreDisconnect) {
-		this.onPreDisconnect = onPreDisconnect;
-	}
-	
-	public void setOnPostDisconnect(ConnectionEvent onPostDisconnect) {
-		this.onPostDisconnect = onPostDisconnect;
-	}
-	
-	public void setOnMessageSent(MessageEvent onMessageSent) {
-		this.onMessageSent = onMessageSent;
-	}
-	
-	public void setOnMessageReceived(MessageEvent onMessageReceived) {
-		this.onMessageReceived = onMessageReceived;
-	}
-	
-	public void setListenerBehavior(ListenerBehavior behavior) {
-		this.listenerBehavior = behavior;
-	}
-	
-	public void setDebugEnabled(boolean debugEnabled) {
-		this.debugEnabled = debugEnabled;
-	}
-	
-	public void setEnableEvents(boolean enableEvents) {
-		this.enableEvents = enableEvents;
-	}
-	
-	public synchronized void addResponseHandler(String command, MessageHandler handler) {
-		responseHandlers.put(command, handler);
-	}
-	
-	public synchronized void removeResponseHandler(String command) {
-		responseHandlers.remove(command);
-	}
-	
-	public void connect(int connectionTimeout, int readTimeout) {
-		if (enableEvents) {
-			onPreConnect.onEvent();
-		}
-		int retries = maxRetries;
-		while (retries > 0) {
+			bos.flush();
+		} finally {
 			try {
-				printDebug("Attempting to connect...");
+				if (bos != null) {
+					bos.close();
+				}
+				if (fos != null) {
+					fos.close();
+				}
+				if (sock != null) {
+					sock.close();
+				}
+			} catch (IOException e) {
+				System.err.println("Could Not Close All Elements: " + e.getMessage());
+			}
+		}
+	}
+	
+	public void connectToServer(String address, int port) throws IOException {
+		if (socket != null && !socket.isClosed()) {
+			System.out.println("Closing existing socket before reconnecting.");
+			socket.close();
+		}
+		
+		new Thread(() -> {
+			try {
+				System.out.println("Initializing socket.");
 				socket = new Socket();
-				socket.connect(new java.net.InetSocketAddress(serverAddress, serverPort), connectionTimeout);
-				socket.setSoTimeout(readTimeout);
+				System.out.println("Attempting to connect to " + address + ":" + port);
+				socket.connect(new InetSocketAddress(address, port), 10000);
+				System.out.println("Socket connected successfully.");
 				
-				reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-				writer = new PrintWriter(socket.getOutputStream(), true);
+				socket.setSoTimeout(10000);
+				System.out.println("Socket timeout set.");
 				
 				isConnected = true;
-				if (enableEvents) {
-					onConnect.onEvent();
-				}
+				serverHost = address;
+				serverPort = port;
 				
-				startListener();
-				return;
+				BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+				new Thread(() -> receiveMessages(in)).start();
+				
+				writer = new PrintWriter(socket.getOutputStream(), true);
+				System.out.println("CONNECTED: " + address + ":" + port);
+				
 			} catch (IOException e) {
-				retries--;
-				printDebug("Connection failed. Retries left: " + retries);
-				try {
-					Thread.sleep(retryDelay);
-				} catch (InterruptedException ignored) {
-				}
-				disconnect();
+				isConnected = false;
+				System.err.println("Failed to connect: " + e.getMessage());
 			}
-		}
-		printDebug("Failed to connect after " + maxRetries + " attempts.");
+		}).start();
 	}
 	
-	public void connectAsync(int connectionTimeout, int readTimeout) {
-		new Thread(() -> connect(connectionTimeout, readTimeout)).start();
-	}
-	
-	public void sendMessage(Object message) {
-		if (message != null) {
-			if (isConnected && writer != null) {
-				String serialized = serializer.serialize(message);
-				if (serialized != null) {
-					writer.println(serialized);
-					printDebug("Sent: " + serialized);
-					onMessageSent.onMessage(serialized);
+	public void receiveMessages(BufferedReader in) {
+		new Thread(() -> {
+			try {
+				String fromServer;
+				while ((fromServer = in.readLine()) != null) {
+					String command = fromServer.split(" ")[0];
+					MessageHandler handler = messageHandlers.get(command);
+					if (handler != null) {
+						handler.handle(fromServer);
+					} else {
+						System.out.println("Received: " + fromServer);
+					}
 				}
-			} else {
-				printDebug("Not connected. Cannot send message.");
+			} catch (SocketTimeoutException e) {
+				isConnected = false;
+				System.err.println("Read timed out.");
+			} catch (IOException e) {
+				isConnected = false;
+				System.err.println("Error reading from server: " + e.getMessage());
 			}
-		}
+		}).start();
 	}
 	
-	public void disconnect() {
-		if (enableEvents) {
-			onPreDisconnect.onEvent();
-		}
-		printDebug("Disconnecting...");
+	public void disconnectFromServer() {
 		try {
-			if (reader != null) {
-				reader.close();
-			}
-			if (writer != null) {
-				writer.close();
-			}
+			isConnected = false;
 			if (socket != null && !socket.isClosed()) {
 				socket.close();
-			}
-			if (listenerThread != null && listenerThread.isAlive()) {
-				listenerThread.interrupt();
-			}
-			
-			isConnected = false;
-			if (enableEvents) {
-				onDisconnect.onEvent();
-			}
-			if (enableEvents) {
-				onPostDisconnect.onEvent();
+				System.out.println("Client socket closed.");
 			}
 		} catch (IOException e) {
-			printDebug("Error during disconnect: " + e.getMessage());
+			System.err.println("Error disconnecting from server: " + e.getMessage());
 		}
 	}
 	
-	public void setFileHandler(FileHandler fileHandler) {
-		this.fileHandler = fileHandler;
-	}
-	
-	private void startListener() {
-		listenerThread = new Thread(() -> {
-			System.out.println("Starting listener thread");
-			try {
-				String message;
-				while ((message = reader.readLine()) != null) {
-					onMessageReceived.onMessage(message);
-					listenerBehavior.onMessage(message);
+	public void listenForServerBroadcasts() {
+		int broadCastPort = 8888;
+		System.out.println("Using broadcastPort: " + broadCastPort);
+		
+		try (DatagramSocket socket = new DatagramSocket(broadCastPort, InetAddress.getByName("0.0.0.0"))) {
+			socket.setBroadcast(true);
+			while (true) {
+				if (!isConnected) {
+					byte[] buffer = new byte[256];
+					DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+					socket.receive(packet);
+					
+					String message = new String(packet.getData(), 0, packet.getLength());
+					if (message.startsWith("SERVER_DISCOVERY:")) {
+						String[] parts = message.split(":");
+						String serverAddress = packet.getAddress().getHostAddress();
+						int serverPort = Integer.parseInt(parts[1]);
+						
+						System.out.println("Discovered server at " + serverAddress + ":" + serverPort);
+						try {
+							connectToServer(serverAddress, serverPort);
+						} catch (IOException e) {
+							System.err.println("Error connecting to server; " + serverAddress + ":" + serverPort + " | " + e.getMessage());
+						}
+					}
+				} else {
+					System.out.println("Already connected");
+					break;
 				}
-			} catch (IOException e) {
-				printDebug("Connection lost: " + e.getMessage());
-				disconnect();
 			}
-		});
-		listenerThread.start();
-	}
-	
-	private void setDefaultListenerBehavior() {
-		this.listenerBehavior = message -> {
-			printDebug("Received: " + message);
-			if (message.startsWith("STARTFILE")) {
-				String[] parts = message.split(" ");
-				String fileName = parts[1];
-				long fileSize = Long.parseLong(parts[2]);
-				String fileType = parts[3];
-				
-				// Prepare to receive file data
-				try {
-					fileHandler.handleFile(fileName, new ByteArrayInputStream(new byte[0]), (int) fileSize, fileType);
-				} catch (IOException e) {
-					throw new RuntimeException(e);
-				}
-				
-			} else if (message.startsWith("FILEDATA")) {
-				// Process the file data chunk
-				String fileDataChunk = message.substring("FILEDATA".length());
-				System.out.println("Received chunk: " + fileDataChunk);
-				
-				// Here, append the chunk to the actual file content
-				fileHandler.appendFileData(fileDataChunk);
-				
-			} else if (message.equals("ENDFILE")) {
-				printDebug("File transfer completed.");
-				fileHandler.finishFile();
-			}
-		};
-	}
-	
-	private void printDebug(String message) {
-		if (debugEnabled) {
-			System.out.println(message);
+		} catch (IOException e) {
+			System.err.println("Error listening for broadcasts: " + e.getMessage());
 		}
 	}
 	
-	@FunctionalInterface
-	public interface MessageHandler {
-		void handle(String message);
+	public void registerMessageHandler(String command, MessageHandler handler) {
+		messageHandlers.put(command, handler);
 	}
 	
-	@FunctionalInterface
-	public interface ListenerBehavior {
-		void onMessage(String message);
+	private void handleShutdown(String message) {
+		System.out.println("Received shutdown, Disconnecting...");
+		disconnectFromServer();
 	}
 	
-	@FunctionalInterface
-	public interface ConnectionEvent {
-		void onEvent();
+	private void handleUpdateMessage(String message) {
+		System.out.println("Received update message: " + message);
+		// Add code to handle the update
 	}
-	
-	@FunctionalInterface
-	public interface MessageEvent {
-		void onMessage(String message);
-	}
-	
-	@FunctionalInterface
-	public interface MessageSerializer {
-		String serialize(Object message);
-	}
-	
-	public interface FileHandler {
-		void handleFile(String fileName, InputStream fileData, int size, String fileType) throws IOException;
-		
-		void appendFileData(String fileDataChunk);
-		
-		void finishFile();
-	}
-	
 }
