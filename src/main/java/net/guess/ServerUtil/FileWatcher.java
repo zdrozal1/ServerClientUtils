@@ -1,4 +1,4 @@
-package net.guess.Other;
+package net.guess.ServerUtil;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -6,12 +6,12 @@ import java.util.function.Consumer;
 
 public class FileWatcher {
 	private final Path filePath;
-	private Path dir;
 	private final String fileNameToWatch;
 	private final Consumer<Path> onChange;
 	private final long debounceTime;
-	private long lastUpdateTime = 0;
 	private final WatchEvent.Kind<Path>[] watchEventKinds;
+	private Path dir;
+	private long lastUpdateTime = 0;
 	private boolean isValid = true;
 	
 	@SafeVarargs
@@ -19,33 +19,15 @@ public class FileWatcher {
 		this.filePath = Paths.get(filePath);
 		this.dir = this.filePath.getParent();
 		
-		// Skip file existence checks if only ENTRY_CREATE event is passed
-		boolean checkFileExistence = true;
-		for (WatchEvent.Kind<Path> kind : watchEventKinds) {
-			if (kind == StandardWatchEventKinds.ENTRY_CREATE) {
-				checkFileExistence = false;
-				break;
-			}
+		// Ensure that dir is never null
+		if (this.dir == null) {
+			this.dir = Paths.get(""); // Fallback to current directory
 		}
 		
-		if (checkFileExistence) {
-			if (!Files.exists(this.filePath)) {
-				System.err.println("File " + filePath + " does not exist");
-				isValid = false;
-			}
-			
-			if (!Files.isRegularFile(this.filePath)) {
-				System.err.println("File " + filePath + " is not a regular file");
-				isValid = false;
-			}
-			
-			if (!Files.isDirectory(this.dir)) {
-				System.err.println("File " + filePath + " is not in a valid directory");
-				isValid = false;
-			}
-		} //TODO make sure this works
-		if (this.dir == null) {
-			this.dir = Path.of("");
+		// Check if the parent directory is valid
+		if (!Files.isDirectory(this.dir)) {
+			System.err.println("Directory " + dir + " is not valid");
+			isValid = false;
 		}
 		
 		this.fileNameToWatch = this.filePath.getFileName().toString();
@@ -56,7 +38,7 @@ public class FileWatcher {
 	
 	public void startWatching() {
 		if (!isValid) {
-			System.err.println("FileWatcher is not valid for: " + fileNameToWatch + " Aborting.");
+			System.err.println("FileWatcher is not valid for: " + fileNameToWatch + " Aborting FileWatcher.");
 			return;
 		}
 		
@@ -82,9 +64,27 @@ public class FileWatcher {
 						
 						Path fileName = ((WatchEvent<Path>) event).context();
 						if (fileName.toString().equals(fileNameToWatch)) {
+							Path file = dir.resolve(fileName);
+							
+							// Handle ENTRY_CREATE event
+							if (kind == StandardWatchEventKinds.ENTRY_CREATE) {
+								if (!Files.exists(file)) {
+									System.err.println("File " + file + " was created but does not exist yet, skipping.");
+									continue;
+								}
+							}
+							
+							// Handle ENTRY_MODIFY event
+							if (kind == StandardWatchEventKinds.ENTRY_MODIFY) {
+								if (!Files.exists(file) || !Files.isRegularFile(file)) {
+									System.err.println("File " + file + " does not exist or is not a regular file, skipping.");
+									continue;
+								}
+							}
+							
 							long currentTime = System.currentTimeMillis();
 							if (currentTime - lastUpdateTime >= debounceTime) {
-								onChange.accept(dir.resolve(fileName));
+								onChange.accept(file);
 								lastUpdateTime = currentTime;
 							}
 						}

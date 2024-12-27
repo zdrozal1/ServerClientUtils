@@ -1,8 +1,8 @@
-package net.guess.Other;
+package net.guess.ClientUtil;
 
 import java.io.IOException;
 
 @FunctionalInterface
-public interface MessageHandler {
+public interface EventHandler {
 	void handle(String message) throws IOException;
 }
