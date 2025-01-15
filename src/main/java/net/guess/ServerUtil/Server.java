@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit;
 
 public class Server {
 	private final List<FileWatcher> fileWatchers = new ArrayList<>();
-	private boolean isConnected = false;
+	public boolean isConnected = false;
 	private ServerSocket serverSocket;
 	private Socket clientSocket;
 	private PrintWriter writer;

@@ -27,11 +27,8 @@ public class Client {
 	}
 	
 	public synchronized void receiveFileFromServer(String name) {
-		try (Socket sock = new Socket(serverHost, serverPort);
-		     InputStream is = sock.getInputStream();
-		     DataInputStream dataIn = new DataInputStream(is);  // To read the file size
-		     FileOutputStream fos = new FileOutputStream(name);
-		     BufferedOutputStream bos = new BufferedOutputStream(fos)) {
+		try (Socket sock = new Socket(serverHost, serverPort); InputStream is = sock.getInputStream(); DataInputStream dataIn = new DataInputStream(is);  // To read the file size
+		     FileOutputStream fos = new FileOutputStream(name); BufferedOutputStream bos = new BufferedOutputStream(fos)) {
 			
 			// Read the file size first
 			int fileSize = dataIn.readInt();  // Read the file size
@@ -50,7 +47,6 @@ public class Client {
 			clientEventManager.triggerClientError("Error receiving file", e);
 		}
 	}
-	
 	
 	public void connectToServer(String address, int port) throws IOException {
 		if (socket != null && !socket.isClosed()) {
@@ -157,6 +153,9 @@ public class Client {
 		}
 	}
 	
+	/* TODO:
+	 *  Add support for arguments, so have arguments as a string
+	 */
 	public void registerMessageHandler(String command, EventHandler handler) {
 		messageHandlers.put(command, handler);
 	}
